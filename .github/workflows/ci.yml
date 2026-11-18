@@ -1,13 +1,104 @@
-name: Java CI
-on: [push, pull_request]
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
+    name: Unit and integration tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - run: mvn -B verify
+      - name: Verify
+        run: ./mvnw -B verify
+
+  docker-smoke:
+    name: Docker build and smoke test
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and start the stack
+        run: docker compose up -d --build
+      - name: Wait for the application health check
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/actuator/health | grep -q '"status":"UP"'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+      - name: Smoke test bookings, overlaps, cancellation and rebooking
+        run: |
+          START_EPOCH=$(( $(date +%s) + 2592000 ))
+          END_EPOCH=$(( START_EPOCH + 3600 ))
+          NEXT_EPOCH=$(( END_EPOCH + 3600 ))
+          START=$(date -u -d "@$START_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+          END=$(date -u -d "@$END_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+          NEXT=$(date -u -d "@$NEXT_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+
+          RESOURCE=$(curl -fsS -X POST http://localhost:8080/api/resources \
+            -H 'Content-Type: application/json' \
+            -d "{\"name\":\"CI Room $GITHUB_RUN_ID\"}")
+          RESOURCE_ID=$(echo "$RESOURCE" | jq -r '.id')
+          test "$RESOURCE_ID" != "null"
+
+          BOOKING=$(curl -fsS -X POST http://localhost:8080/api/bookings \
+            -H 'Content-Type: application/json' \
+            -d "{\"resourceId\":$RESOURCE_ID,\"customerName\":\"CI Alice\",\"startsAt\":\"$START\",\"endsAt\":\"$END\"}")
+          BOOKING_ID=$(echo "$BOOKING" | jq -r '.id')
+          test "$BOOKING_ID" != "null"
+          echo "$BOOKING" | jq -e '.status == "CONFIRMED"'
+
+          OVERLAP=$(curl -sS -o /tmp/overlap.json -w '%{http_code}' -X POST http://localhost:8080/api/bookings \
+            -H 'Content-Type: application/json' \
+            -d "{\"resourceId\":$RESOURCE_ID,\"customerName\":\"CI Bob\",\"startsAt\":\"$START\",\"endsAt\":\"$NEXT\"}")
+          test "$OVERLAP" = "409"
+          jq -e '.code == "booking_conflict"' /tmp/overlap.json
+
+          ADJACENT=$(curl -sS -o /tmp/adjacent.json -w '%{http_code}' -X POST http://localhost:8080/api/bookings \
+            -H 'Content-Type: application/json' \
+            -d "{\"resourceId\":$RESOURCE_ID,\"customerName\":\"CI Bob\",\"startsAt\":\"$END\",\"endsAt\":\"$NEXT\"}")
+          test "$ADJACENT" = "201"
+
+          CANCELLED=$(curl -fsS -X POST "http://localhost:8080/api/bookings/$BOOKING_ID/cancel")
+          echo "$CANCELLED" | jq -e '.status == "CANCELLED" and .cancelledAt != null'
+
+          REBOOK=$(curl -sS -o /tmp/rebook.json -w '%{http_code}' -X POST http://localhost:8080/api/bookings \
+            -H 'Content-Type: application/json' \
+            -d "{\"resourceId\":$RESOURCE_ID,\"customerName\":\"CI Carol\",\"startsAt\":\"$START\",\"endsAt\":\"$END\"}")
+          test "$REBOOK" = "201"
+
+          curl -fsS "http://localhost:8080/api/resources/$RESOURCE_ID/bookings?status=CONFIRMED" \
+            | jq -e '.totalElements == 2'
+          curl -fsS "http://localhost:8080/api/resources/$RESOURCE_ID/bookings?status=CANCELLED" \
+            | jq -e '.totalElements == 1'
+
+          INVALID=$(curl -sS -o /tmp/invalid.json -w '%{http_code}' -X POST http://localhost:8080/api/bookings \
+            -H 'Content-Type: application/json' \
+            -d "{\"resourceId\":$RESOURCE_ID,\"customerName\":\"CI Dave\",\"startsAt\":\"$START\",\"endsAt\":\"$START\"}")
+          test "$INVALID" = "400"
+          jq -e '.code == "invalid_interval"' /tmp/invalid.json
+
+          MISSING=$(curl -sS -o /tmp/missing.json -w '%{http_code}' http://localhost:8080/api/resources/999999/bookings)
+          test "$MISSING" = "404"
+          jq -e '.code == "resource_not_found"' /tmp/missing.json
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
