@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 @Service
 public class BookingService {
@@ -27,7 +28,9 @@ public class BookingService {
 
     @Transactional
     public BookingDtos.BookingResponse create(BookingDtos.CreateBookingRequest request) {
-        Instant now = Instant.now(clock);
+        // PostgreSQL timestamps have microsecond precision, so truncate before the value
+        // is both persisted and returned to keep the API representation stable.
+        Instant now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
         if (!request.endsAt().isAfter(request.startsAt())) {
             throw new InvalidBookingIntervalException();
         }
@@ -62,7 +65,7 @@ public class BookingService {
     public BookingDtos.BookingResponse cancel(Long id) {
         Booking booking = bookings.findByIdForUpdate(id)
                 .orElseThrow(() -> new BookingNotFoundException(id));
-        booking.cancel(Instant.now(clock));
+        booking.cancel(Instant.now(clock).truncatedTo(ChronoUnit.MICROS));
         return BookingDtos.BookingResponse.from(booking);
     }
 

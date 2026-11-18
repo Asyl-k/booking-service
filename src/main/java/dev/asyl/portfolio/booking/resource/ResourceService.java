@@ -7,6 +7,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 @Service
 public class ResourceService {
@@ -21,7 +22,8 @@ public class ResourceService {
 
     @Transactional
     public ResourceDtos.ResourceResponse create(ResourceDtos.CreateResourceRequest request) {
-        Resource resource = new Resource(request.name().trim(), Instant.now(clock));
+        Instant now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
+        Resource resource = new Resource(request.name().trim(), now);
         return ResourceDtos.ResourceResponse.from(resources.save(resource));
     }
 

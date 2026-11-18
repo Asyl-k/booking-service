@@ -139,12 +139,14 @@ class BookingApiIntegrationTest extends AbstractIntegrationTest {
 
     @Test
     void differentResourcesCanBeBookedConcurrently() throws Exception {
-        long first = createResource(uniqueName("Room")).get("id").asLong();
-        long second = createResource(uniqueName("Room")).get("id").asLong();
+        List<Long> resourceIds = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            resourceIds.add(createResource(uniqueName("Room")).get("id").asLong());
+        }
         Instant start = BASE.plus(6, ChronoUnit.DAYS);
 
         List<Integer> statuses = runConcurrently(10, index -> createBooking(
-                index % 2 == 0 ? first : second,
+                resourceIds.get(index),
                 "Customer " + index,
                 start,
                 start.plusSeconds(3600)
